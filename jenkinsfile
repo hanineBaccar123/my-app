@@ -12,7 +12,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                echo '📥 Récupération du code source...'
+                echo ' Récupération du code source...'
                 checkout scm
             }
         }
@@ -20,44 +20,49 @@ pipeline {
         stage('Detect Changes') {
             steps {
                 script {
-                    echo '🔍 Détection des changements dans le repository...'
+                    echo ' Détection des changements dans le repository...'
                     
                     // Vérifier si c'est le premier build
                     def isFirstBuild = currentBuild.previousBuild == null
                     
                     if (isFirstBuild) {
-                        echo '⚠️ Premier build détecté - construction complète'
+                        echo ' Premier build détecté - construction complète'
                         env.SERVER_CHANGED = 'true'
                         env.CLIENT_CHANGED = 'true'
                     } else {
-                        // Vérifier les changements dans le dossier server (Windows)
-                        def serverChanges = bat(
-                            script: '@echo off & git diff --name-only HEAD~1 HEAD | findstr "^server/"',
-                            returnStatus: true
-                        )
-                        
-                        if (serverChanges == 0) {
+                        try {
+                            // Vérifier les changements dans le dossier Server (avec majuscule)
+                            def serverOutput = bat(
+                                script: '@echo off & git diff --name-only HEAD~1 HEAD',
+                                returnStdout: true
+                            ).trim()
+                            
+                            echo "Fichiers modifiés:\n${serverOutput}"
+                            
+                            // Vérifier si des fichiers dans Server/ ou server/ ont changé
+                            if (serverOutput.toLowerCase().contains('server/')) {
+                                env.SERVER_CHANGED = 'true'
+                                echo " Changements détectés dans Server/"
+                            } else {
+                                echo " Aucun changement dans Server/"
+                            }
+                            
+                            // Vérifier si des fichiers dans Client/ ou client/ ont changé
+                            if (serverOutput.toLowerCase().contains('client/')) {
+                                env.CLIENT_CHANGED = 'true'
+                                echo " Changements détectés dans Client/"
+                            } else {
+                                echo " Aucun changement dans Client/"
+                            }
+                        } catch (Exception e) {
+                            echo " Erreur lors de la détection des changements: ${e.message}"
+                            echo "Construction complète par sécurité"
                             env.SERVER_CHANGED = 'true'
-                            echo "✅ Changements détectés dans server/"
-                        } else {
-                            echo "ℹ️ Aucun changement dans server/"
-                        }
-                        
-                        // Vérifier les changements dans le dossier client (Windows)
-                        def clientChanges = bat(
-                            script: '@echo off & git diff --name-only HEAD~1 HEAD | findstr "^client/"',
-                            returnStatus: true
-                        )
-                        
-                        if (clientChanges == 0) {
                             env.CLIENT_CHANGED = 'true'
-                            echo "✅ Changements détectés dans client/"
-                        } else {
-                            echo "ℹ️ Aucun changement dans client/"
                         }
                     }
                     
-                    echo "\n📊 Résumé de la détection:"
+                    echo "\n Résumé de la détection:"
                     echo "SERVER_CHANGED: ${env.SERVER_CHANGED}"
                     echo "CLIENT_CHANGED: ${env.CLIENT_CHANGED}"
                 }
@@ -69,12 +74,16 @@ pipeline {
                 expression { env.SERVER_CHANGED == 'true' }
             }
             steps {
-                dir('server') {
-                    script {
+                script {
+                    // Vérifier si le dossier existe (Server ou server)
+                    def serverDir = fileExists('Server') ? 'Server' : 'server'
+                    echo " Utilisation du dossier: ${serverDir}"
+                    
+                    dir(serverDir) {
                         echo '🏗️ Construction de l\'image Docker Server...'
                         dockerImageServer = docker.build("${IMAGE_NAME_SERVER}:${BUILD_NUMBER}", ".")
                         dockerImageServer.tag('latest')
-                        echo "✅ Image Server construite: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
+                        echo " Image Server construite: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
                     }
                 }
             }
@@ -85,12 +94,16 @@ pipeline {
                 expression { env.CLIENT_CHANGED == 'true' }
             }
             steps {
-                dir('client') {
-                    script {
+                script {
+                    // Vérifier si le dossier existe (Client ou client)
+                    def clientDir = fileExists('Client') ? 'Client' : 'client'
+                    echo " Utilisation du dossier: ${clientDir}"
+                    
+                    dir(clientDir) {
                         echo '🏗️ Construction de l\'image Docker Client...'
                         dockerImageClient = docker.build("${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}", ".")
                         dockerImageClient.tag('latest')
-                        echo "✅ Image Client construite: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
+                        echo " Image Client construite: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
                     }
                 }
             }
@@ -98,14 +111,16 @@ pipeline {
         
         stage('Scan Server Image') {
             when {
-                expression { env.SERVER_CHANGED == 'true' }
+                expression { 
+                    env.SERVER_CHANGED == 'true' && 
+                    bat(script: '@echo off & where trivy', returnStatus: true) == 0 
+                }
             }
             steps {
                 script {
-                    echo '🔒 Scan de sécurité de l\'image Server...'
-                    // Note: Trivy doit être installé sur Windows
+                    echo ' Scan de sécurité de l\'image Server avec Trivy...'
                     bat """
-                        trivy image --severity HIGH,CRITICAL --exit-code 0 ${IMAGE_NAME_SERVER}:${BUILD_NUMBER} || echo Scan termine avec avertissements
+                        trivy image --severity HIGH,CRITICAL --exit-code 0 ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}
                     """
                 }
             }
@@ -113,13 +128,16 @@ pipeline {
         
         stage('Scan Client Image') {
             when {
-                expression { env.CLIENT_CHANGED == 'true' }
+                expression { 
+                    env.CLIENT_CHANGED == 'true' && 
+                    bat(script: '@echo off & where trivy', returnStatus: true) == 0 
+                }
             }
             steps {
                 script {
-                    echo '🔒 Scan de sécurité de l\'image Client...'
+                    echo ' Scan de sécurité de l\'image Client avec Trivy...'
                     bat """
-                        trivy image --severity HIGH,CRITICAL --exit-code 0 ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER} || echo Scan termine avec avertissements
+                        trivy image --severity HIGH,CRITICAL --exit-code 0 ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}
                     """
                 }
             }
@@ -133,20 +151,20 @@ pipeline {
             }
             steps {
                 script {
-                    echo '📤 Push des images vers Docker Hub...'
+                    echo 'Push des images vers Docker Hub...'
                     docker.withRegistry('', DOCKERHUB_CREDENTIALS_ID) {
                         if (env.SERVER_CHANGED == 'true') {
-                            echo "Pushing Server image..."
+                            echo " Push de l'image Server..."
                             dockerImageServer.push("${BUILD_NUMBER}")
                             dockerImageServer.push('latest')
-                            echo "✅ Server image pushed: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
+                            echo " Server image pushed: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
                         }
                         
                         if (env.CLIENT_CHANGED == 'true') {
-                            echo "Pushing Client image..."
+                            echo " Push de l'image Client..."
                             dockerImageClient.push("${BUILD_NUMBER}")
                             dockerImageClient.push('latest')
-                            echo "✅ Client image pushed: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
+                            echo "  Client image pushed: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
                         }
                     }
                 }
@@ -161,14 +179,18 @@ pipeline {
             }
             steps {
                 script {
-                    echo '🚀 Déploiement de l\'application...'
-                    bat '''
-                        docker-compose down
-                        docker-compose up -d
+                    echo ' Déploiement de l\'application...'
+                    
+                    // Vérifier si docker-compose est disponible
+                    def composeCmd = bat(script: '@echo off & where docker-compose', returnStatus: true) == 0 ? 'docker-compose' : 'docker compose'
+                    
+                    bat """
+                        ${composeCmd} down || exit 0
+                        ${composeCmd} up -d
                         timeout /t 5 /nobreak
-                        docker-compose ps
-                    '''
-                    echo '✅ Déploiement terminé'
+                        ${composeCmd} ps
+                    """
+                    echo ' Déploiement terminé'
                 }
             }
         }
@@ -179,99 +201,126 @@ pipeline {
             script {
                 echo '🧹 === DÉBUT DU NETTOYAGE ==='
                 
-                // 1. Nettoyer les conteneurs arrêtés
-                echo '🗑️ Suppression des conteneurs arrêtés...'
-                bat 'docker container prune -f || exit 0'
-                
-                // 2. Nettoyer les images non taguées
-                echo '🗑️ Suppression des images non taguées...'
-                bat 'docker image prune -f || exit 0'
-                
-                // 3. Nettoyer les anciennes images Server (garder les 5 dernières)
-                if (env.SERVER_CHANGED == 'true') {
-                    echo '🗑️ Nettoyage des anciennes images Server...'
-                    bat """
-                        @echo off
-                        for /f "skip=5 tokens=3" %%i in ('docker images ${IMAGE_NAME_SERVER} --format "{{.ID}} {{.Tag}}" ^| findstr /v "latest"') do docker rmi -f %%i 2>nul
-                    """ 
+                try {
+                    // 1. Nettoyer les conteneurs arrêtés
+                    echo ' Suppression des conteneurs arrêtés...'
+                    bat 'docker container prune -f || exit 0'
+                    
+                    // 2. Nettoyer les images non taguées (dangling)
+                    echo ' Suppression des images non taguées...'
+                    bat 'docker image prune -f || exit 0'
+                    
+                    // 3. Nettoyer les anciennes images (méthode simplifiée pour Windows)
+                    if (env.SERVER_CHANGED == 'true') {
+                        echo ' Nettoyage des anciennes images Server (garde les 5 dernières)...'
+                        bat """
+                            @echo off
+                            docker images ${IMAGE_NAME_SERVER} --format "{{.ID}}" | findstr /v /r "^$" > temp_server_images.txt
+                            powershell -Command "\$images = Get-Content temp_server_images.txt; if (\$images.Count -gt 5) { \$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \$_ 2>nul } }"
+                            del temp_server_images.txt
+                        """ 
+                    }
+                    
+                    if (env.CLIENT_CHANGED == 'true') {
+                        echo ' Nettoyage des anciennes images Client (garde les 5 dernières)...'
+                        bat """
+                            @echo off
+                            docker images ${IMAGE_NAME_CLIENT} --format "{{.ID}}" | findstr /v /r "^$" > temp_client_images.txt
+                            powershell -Command "\$images = Get-Content temp_client_images.txt; if (\$images.Count -gt 5) { \$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \$_ 2>nul } }"
+                            del temp_client_images.txt
+                        """
+                    }
+                    
+                    // 4. Nettoyer les volumes non utilisés
+                    echo ' Suppression des volumes non utilisés...'
+                    bat 'docker volume prune -f || exit 0'
+                    
+                    // 5. Nettoyer les réseaux non utilisés
+                    echo ' Suppression des réseaux non utilisés...'
+                    bat 'docker network prune -f || exit 0'
+                    
+                    // 6. Nettoyer le cache de build
+                    echo ' Nettoyage du cache de build Docker...'
+                    bat 'docker builder prune -f --keep-storage 10GB || exit 0'
+                    
+                    // 7. Afficher l'utilisation de l'espace disque
+                    echo ' Utilisation de l\'espace disque Docker:'
+                    bat 'docker system df || exit 0'
+                    
+                    // 8. Déconnexion de Docker Hub
+                    echo ' Déconnexion de Docker Hub...'
+                    bat 'docker logout || exit 0'
+                    
+                } catch (Exception e) {
+                    echo " Erreur pendant le nettoyage: ${e.message}"
+                    echo "Le nettoyage a partiellement échoué mais le pipeline continue"
                 }
                 
-                // 4. Nettoyer les anciennes images Client (garder les 5 dernières)
-                if (env.CLIENT_CHANGED == 'true') {
-                    echo '🗑️ Nettoyage des anciennes images Client...'
-                    bat """
-                        @echo off
-                        for /f "skip=5 tokens=3" %%i in ('docker images ${IMAGE_NAME_CLIENT} --format "{{.ID}} {{.Tag}}" ^| findstr /v "latest"') do docker rmi -f %%i 2>nul
-                    """
-                }
-                
-                // 5. Nettoyer les volumes non utilisés
-                echo '🗑️ Suppression des volumes non utilisés...'
-                bat 'docker volume prune -f || exit 0'
-                
-                // 6. Nettoyer les réseaux non utilisés
-                echo '🗑️ Suppression des réseaux non utilisés...'
-                bat 'docker network prune -f || exit 0'
-                
-                // 7. Nettoyer le cache de build
-                echo '🗑️ Nettoyage du cache de build Docker...'
-                bat 'docker builder prune -f --keep-storage 10GB || exit 0'
-                
-                // 8. Afficher l'utilisation de l'espace disque
-                echo '📊 Utilisation de l\'espace disque Docker:'
-                bat 'docker system df'
-                
-                // 9. Déconnexion de Docker Hub
-                echo '🔓 Déconnexion de Docker Hub...'
-                bat 'docker logout || exit 0'
-                
-                echo '✅ === NETTOYAGE TERMINÉ ==='
+                echo ' === NETTOYAGE TERMINÉ ==='
             }
         }
         
         success {
             script {
-                echo '🎉 === PIPELINE RÉUSSI ==='
+                echo ' === PIPELINE RÉUSSI ==='
                 echo "Build #${BUILD_NUMBER} terminé avec succès"
+                echo " Durée: ${currentBuild.durationString.replace(' and counting', '')}"
                 
                 if (env.SERVER_CHANGED == 'false' && env.CLIENT_CHANGED == 'false') {
-                    echo 'ℹ️ Aucun changement détecté - Aucune construction effectuée'
+                    echo '\n OPTIMISATION ACTIVÉE!'
+                    echo 'Aucun changement détecté - Aucune construction effectuée'
+                    echo ' Le pipeline a été exécuté en mode optimisé (changeset detection)'
                 } else {
-                    echo '📦 Images construites et poussées vers Docker Hub:'
+                    echo '\n Images construites et poussées vers Docker Hub:'
                     if (env.SERVER_CHANGED == 'true') {
-                        echo "  ✅ Server: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
+                        echo "   Server: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
                         echo "             ${IMAGE_NAME_SERVER}:latest"
                     }
                     if (env.CLIENT_CHANGED == 'true') {
-                        echo "  ✅ Client: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
+                        echo "   Client: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
                         echo "             ${IMAGE_NAME_CLIENT}:latest"
                     }
                 }
+                
+                echo '\n Liens Docker Hub:'
+                echo "  • Server: https://hub.docker.com/r/haninebaccar/mern-server"
+                echo "  • Client: https://hub.docker.com/r/haninebaccar/mern-client"
             }
         }
         
         failure {
             script {
-                echo '❌ === PIPELINE ÉCHOUÉ ==='
+                echo ' === PIPELINE ÉCHOUÉ ==='
                 echo "Build #${BUILD_NUMBER} a échoué"
-                echo '📋 Consultez les logs ci-dessus pour plus de détails'
+                echo " Durée: ${currentBuild.durationString.replace(' and counting', '')}"
+                echo '\n Consultez les logs ci-dessus pour identifier le problème'
                 
-                // Afficher les logs des conteneurs en cas d'échec
-                echo '\n📄 Logs des conteneurs (50 dernières lignes):'
-                bat 'docker-compose logs --tail=50 || exit 0'
-                
-                // Afficher les conteneurs en cours d'exécution
-                echo '\n🐳 Conteneurs en cours d\'exécution:'
-                bat 'docker ps -a || exit 0'
+                try {
+                    // Afficher les logs des conteneurs en cas d'échec
+                    echo '\n Logs des conteneurs (dernières lignes):'
+                    bat 'docker-compose logs --tail=50 || docker compose logs --tail=50 || exit 0'
+                    
+                    // Afficher les conteneurs en cours d'exécution
+                    echo '\n État des conteneurs:'
+                    bat 'docker ps -a || exit 0'
+                    
+                    // Afficher les images disponibles
+                    echo '\n Images Docker disponibles:'
+                    bat 'docker images || exit 0'
+                } catch (Exception e) {
+                    echo " Impossible d'afficher les informations de debug: ${e.message}"
+                }
             }
         }
         
         unstable {
-            echo '⚠️ Le pipeline est instable'
+            echo ' Le pipeline est instable'
+            echo 'Certains tests ou scans ont échoué mais le build a continué'
         }
         
         aborted {
-            echo '🛑 Pipeline annulé par l\'utilisateur'
+            echo ' Pipeline annulé par l\'utilisateur'
+            echo "Build #${BUILD_NUMBER} interrompu"
         }
     }
 }
