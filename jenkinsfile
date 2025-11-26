@@ -1,46 +1,306 @@
 pipeline {
     agent any
-
+    
     environment {
         DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds'
         IMAGE_NAME_SERVER = 'haninebaccar/mern-server'
         IMAGE_NAME_CLIENT = 'haninebaccar/mern-client'
+        SERVER_CHANGED = 'false'
+        CLIENT_CHANGED = 'false'
     }
-
+    
     stages {
         stage('Checkout') {
-            steps { checkout scm }
+            steps {
+                echo '📥 Récupération du code source...'
+                checkout scm
+            }
         }
-
+        
+        stage('Detect Changes') {
+            steps {
+                script {
+                    echo '🔍 Détection des changements dans le repository...'
+                    
+                    // Vérifier si c'est le premier build
+                    def isFirstBuild = currentBuild.previousBuild == null
+                    
+                    if (isFirstBuild) {
+                        echo '⚠️ Premier build détecté - construction complète'
+                        env.SERVER_CHANGED = 'true'
+                        env.CLIENT_CHANGED = 'true'
+                    } else {
+                        // Détecter les changements dans le dossier server
+                        def serverChanges = sh(
+                            script: 'git diff --name-only HEAD~1 HEAD | grep "^server/" || true',
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (serverChanges) {
+                            env.SERVER_CHANGED = 'true'
+                            echo "✅ Changements détectés dans server/:"
+                            echo "${serverChanges}"
+                        } else {
+                            echo "ℹ️ Aucun changement dans server/"
+                        }
+                        
+                        // Détecter les changements dans le dossier client
+                        def clientChanges = sh(
+                            script: 'git diff --name-only HEAD~1 HEAD | grep "^client/" || true',
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (clientChanges) {
+                            env.CLIENT_CHANGED = 'true'
+                            echo "✅ Changements détectés dans client/:"
+                            echo "${clientChanges}"
+                        } else {
+                            echo "ℹ️ Aucun changement dans client/"
+                        }
+                    }
+                    
+                    echo "\n📊 Résumé de la détection:"
+                    echo "SERVER_CHANGED: ${env.SERVER_CHANGED}"
+                    echo "CLIENT_CHANGED: ${env.CLIENT_CHANGED}"
+                }
+            }
+        }
+        
         stage('Build Server Image') {
+            when {
+                expression { env.SERVER_CHANGED == 'true' }
+            }
             steps {
                 dir('server') {
                     script {
-                        dockerImageServer = docker.build("${IMAGE_NAME_SERVER}:latest", ".")
+                        echo '🏗️ Construction de l\'image Docker Server...'
+                        dockerImageServer = docker.build("${IMAGE_NAME_SERVER}:${BUILD_NUMBER}", ".")
+                        dockerImageServer.tag('latest')
+                        echo "✅ Image Server construite: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
                     }
                 }
             }
         }
-
+        
         stage('Build Client Image') {
+            when {
+                expression { env.CLIENT_CHANGED == 'true' }
+            }
             steps {
                 dir('client') {
                     script {
-                        dockerImageClient = docker.build("${IMAGE_NAME_CLIENT}:latest", ".")
+                        echo '🏗️ Construction de l\'image Docker Client...'
+                        dockerImageClient = docker.build("${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}", ".")
+                        dockerImageClient.tag('latest')
+                        echo "✅ Image Client construite: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
                     }
                 }
             }
         }
-
-        stage('Push Images') {
+        
+        stage('Scan Server Image') {
+            when {
+                expression { env.SERVER_CHANGED == 'true' }
+            }
             steps {
                 script {
+                    echo '🔒 Scan de sécurité de l\'image Server...'
+                    sh """
+                        trivy image --severity HIGH,CRITICAL --exit-code 0 \
+                        ${IMAGE_NAME_SERVER}:${BUILD_NUMBER} || echo 'Scan terminé avec avertissements'
+                    """
+                }
+            }
+        }
+        
+        stage('Scan Client Image') {
+            when {
+                expression { env.CLIENT_CHANGED == 'true' }
+            }
+            steps {
+                script {
+                    echo '🔒 Scan de sécurité de l\'image Client...'
+                    sh """
+                        trivy image --severity HIGH,CRITICAL --exit-code 0 \
+                        ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER} || echo 'Scan terminé avec avertissements'
+                    """
+                }
+            }
+        }
+        
+        stage('Push Images') {
+            when {
+                expression { 
+                    env.SERVER_CHANGED == 'true' || env.CLIENT_CHANGED == 'true' 
+                }
+            }
+            steps {
+                script {
+                    echo '📤 Push des images vers Docker Hub...'
                     docker.withRegistry('', DOCKERHUB_CREDENTIALS_ID) {
-                        dockerImageServer.push('latest')
-                        dockerImageClient.push('latest')
+                        if (env.SERVER_CHANGED == 'true') {
+                            echo "Pushing Server image..."
+                            dockerImageServer.push("${BUILD_NUMBER}")
+                            dockerImageServer.push('latest')
+                            echo "✅ Server image pushed: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
+                        }
+                        
+                        if (env.CLIENT_CHANGED == 'true') {
+                            echo "Pushing Client image..."
+                            dockerImageClient.push("${BUILD_NUMBER}")
+                            dockerImageClient.push('latest')
+                            echo "✅ Client image pushed: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
+                        }
                     }
                 }
             }
+        }
+        
+        stage('Deploy') {
+            when {
+                expression { 
+                    env.SERVER_CHANGED == 'true' || env.CLIENT_CHANGED == 'true' 
+                }
+            }
+            steps {
+                script {
+                    echo '🚀 Déploiement de l\'application...'
+                    sh '''
+                        docker-compose down || true
+                        docker-compose up -d
+                        sleep 5
+                        docker-compose ps
+                    '''
+                    echo '✅ Déploiement terminé'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo '🧹 === DÉBUT DU NETTOYAGE ==='
+                
+                // 1. Nettoyer les conteneurs arrêtés
+                echo '🗑️ Suppression des conteneurs arrêtés...'
+                sh '''
+                    docker container prune -f || true
+                    echo "Conteneurs nettoyés"
+                '''
+                
+                // 2. Nettoyer les images non taguées (dangling images)
+                echo '🗑️ Suppression des images non taguées...'
+                sh '''
+                    docker image prune -f || true
+                    echo "Images dangereuses nettoyées"
+                '''
+                
+                // 3. Nettoyer les anciennes images (garder les 5 dernières versions)
+                if (env.SERVER_CHANGED == 'true') {
+                    echo '🗑️ Nettoyage des anciennes images Server...'
+                    sh """
+                        docker images ${IMAGE_NAME_SERVER} --format "{{.ID}} {{.Tag}}" | \
+                        grep -v latest | awk '{print \$1}' | tail -n +6 | \
+                        xargs -r docker rmi -f || true
+                    """
+                }
+                
+                if (env.CLIENT_CHANGED == 'true') {
+                    echo '🗑️ Nettoyage des anciennes images Client...'
+                    sh """
+                        docker images ${IMAGE_NAME_CLIENT} --format "{{.ID}} {{.Tag}}" | \
+                        grep -v latest | awk '{print \$1}' | tail -n +6 | \
+                        xargs -r docker rmi -f || true
+                    """
+                }
+                
+                // 4. Nettoyer les volumes non utilisés
+                echo '🗑️ Suppression des volumes non utilisés...'
+                sh '''
+                    docker volume prune -f || true
+                    echo "Volumes nettoyés"
+                '''
+                
+                // 5. Nettoyer les réseaux non utilisés
+                echo '🗑️ Suppression des réseaux non utilisés...'
+                sh '''
+                    docker network prune -f || true
+                    echo "Réseaux nettoyés"
+                '''
+                
+                // 6. Nettoyer le cache de build (optionnel - libère beaucoup d'espace)
+                echo '🗑️ Nettoyage du cache de build Docker...'
+                sh '''
+                    docker builder prune -f --keep-storage 10GB || true
+                    echo "Cache de build nettoyé"
+                '''
+                
+                // 7. Afficher l'utilisation de l'espace disque
+                echo '📊 Utilisation de l\'espace disque Docker:'
+                sh 'docker system df'
+                
+                // 8. Déconnexion de Docker Hub
+                echo '🔓 Déconnexion de Docker Hub...'
+                sh 'docker logout || true'
+                
+                echo '✅ === NETTOYAGE TERMINÉ ==='
+            }
+        }
+        
+        success {
+            script {
+                echo '🎉 === PIPELINE RÉUSSI ==='
+                echo "Build #${BUILD_NUMBER} terminé avec succès"
+                
+                if (env.SERVER_CHANGED == 'false' && env.CLIENT_CHANGED == 'false') {
+                    echo 'ℹ️ Aucun changement détecté - Aucune construction effectuée'
+                    echo '💡 Le pipeline a été exécuté mais aucune image n\'a été créée'
+                } else {
+                    echo '📦 Images construites et poussées vers Docker Hub:'
+                    if (env.SERVER_CHANGED == 'true') {
+                        echo "  ✅ Server: ${IMAGE_NAME_SERVER}:${BUILD_NUMBER}"
+                        echo "             ${IMAGE_NAME_SERVER}:latest"
+                    }
+                    if (env.CLIENT_CHANGED == 'true') {
+                        echo "  ✅ Client: ${IMAGE_NAME_CLIENT}:${BUILD_NUMBER}"
+                        echo "             ${IMAGE_NAME_CLIENT}:latest"
+                    }
+                }
+                
+                echo '\n🔗 Liens utiles:'
+                echo "  Docker Hub Server: https://hub.docker.com/r/${IMAGE_NAME_SERVER.replace('/', '/repository/')}"
+                echo "  Docker Hub Client: https://hub.docker.com/r/${IMAGE_NAME_CLIENT.replace('/', '/repository/')}"
+            }
+        }
+        
+        failure {
+            script {
+                echo '❌ === PIPELINE ÉCHOUÉ ==='
+                echo "Build #${BUILD_NUMBER} a échoué"
+                echo '📋 Consultez les logs ci-dessus pour plus de détails'
+                
+                // Afficher les logs des conteneurs en cas d'échec
+                echo '\n📄 Logs des conteneurs (50 dernières lignes):'
+                sh '''
+                    docker-compose logs --tail=50 || true
+                '''
+                
+                // Afficher les conteneurs en cours d'exécution
+                echo '\n🐳 Conteneurs en cours d\'exécution:'
+                sh '''
+                    docker ps -a || true
+                '''
+            }
+        }
+        
+        unstable {
+            echo '⚠️ Le pipeline est instable'
+            echo 'Certains tests ou scans ont échoué mais le build a continué'
+        }
+        
+        aborted {
+            echo '🛑 Pipeline annulé par l\'utilisateur'
         }
     }
 }
