@@ -186,8 +186,8 @@ pipeline {
                     if (env.SERVER_CHANGED == 'true') {
                         bat """
                             @echo off
-                            docker images ${IMAGE_NAME_SERVER} --format "{{.ID}}" | findstr /v /r "^$" > temp_server_images.txt
-                            powershell -Command "\\$images = Get-Content temp_server_images.txt; if (\\$images.Count -gt 5) { \\$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \\$_ 2>nul } }"
+                            docker images ${IMAGE_NAME_SERVER} --format "{{.ID}}" | findstr /v /r "^\$" > temp_server_images.txt
+                            powershell -Command "\$images = Get-Content temp_server_images.txt; if (\$images.Count -gt 5) { \$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \$_ 2>nul } }"
                             del temp_server_images.txt
                         """
                     }
@@ -195,8 +195,8 @@ pipeline {
                     if (env.CLIENT_CHANGED == 'true') {
                         bat """
                             @echo off
-                            docker images ${IMAGE_NAME_CLIENT} --format "{{.ID}}" | findstr /v /r "^$" > temp_client_images.txt
-                            powershell -Command "\\$images = Get-Content temp_client_images.txt; if (\\$images.Count -gt 5) { \\$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \\$_ 2>nul } }"
+                            docker images ${IMAGE_NAME_CLIENT} --format "{{.ID}}" | findstr /v /r "^\$" > temp_client_images.txt
+                            powershell -Command "\$images = Get-Content temp_client_images.txt; if (\$images.Count -gt 5) { \$images | Select-Object -Skip 5 | ForEach-Object { docker rmi -f \$_ 2>nul } }"
                             del temp_client_images.txt
                         """
                     }
